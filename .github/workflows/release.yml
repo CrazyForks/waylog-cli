@@ -3,104 +3,131 @@ name: Release
 on:
   push:
     tags:
-      - 'v*' # Trigger when pushing tags starting with v, e.g. v0.1.0
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build for ${{ matrix.os }}
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: WayLog ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+
+  build-release:
+    name: Build & Upload
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           - os: macos-latest
-            artifact_name: waylog-cli
-            asset_name: waylog-macos-arm64.tar.gz
+            artifact_name: waylog
+            asset_name: waylog-macos-arm64
+            target: aarch64-apple-darwin
           - os: ubuntu-latest
-            artifact_name: waylog-cli
-            asset_name: waylog-linux-x64.tar.gz
+            artifact_name: waylog
+            asset_name: waylog-linux-x64
+            target: x86_64-unknown-linux-musl
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Build
-        run: cargo build --release
-
-      - name: Package
-        run: |
-          cd target/release
-          tar -czf ../../${{ matrix.asset_name }} waylog-cli
-          cd ../..
-
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ${{ matrix.asset_name }}
-          asset_name: ${{ matrix.asset_name }}
-          tag: ${{ github.ref }}
-          overwrite: true
-          make_latest: true
-          draft: true
-          prerelease: false
-          body: |
-            ## WayLog ${{ github.ref_name }}
-            
-            ### 📦 Installation
-            
-            **Homebrew (macOS/Linux):**
-            ```bash
-            brew install shayne-snap/tap/waylog
-            ```
-            
-            **Direct Download:**
-            - [macOS (ARM64)](https://github.com/shayne-snap/waylog-cli/releases/download/${{ github.ref_name }}/waylog-macos-arm64.tar.gz)
-            - [Linux (x64)](https://github.com/shayne-snap/waylog-cli/releases/download/${{ github.ref_name }}/waylog-linux-x64.tar.gz)
-            
-            ### ✨ What's New
-            
-            <!-- Add release notes here before publishing -->
-            
-            ### 📝 Full Changelog
-            
-            See commit history for details.
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+          cd ../../..
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          files: ${{ matrix.asset_name }}.tar.gz
 
   update-formula:
-    needs: build
+    name: Update Homebrew Formula
+    needs: build-release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Tap Repo
+      - name: Checkout Homebrew Tap
         uses: actions/checkout@v4
         with:
-          repository: shayne-snap/homebrew-tap # Confirm this is your Tap repository
+          repository: shayne-snap/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Get Release Info
+        id: get_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: context.ref.replace('refs/tags/', '')
+            });
+            // Find the macOS artifact for Homebrew
+            const asset = release.data.assets.find(a => a.name.includes('macos-arm64'));
+            if (!asset) {
+               throw new Error("macOS asset not found");
+            }
+            return asset.browser_download_url;
+
+      - name: Calculate SHA256
+        id: shasum
+        run: |
+          # The asset is in a draft release, so we need a token to download it if we use API, 
+          # but browser_download_url usually requires authentication for drafts too.
+          # Actually, for drafts, browser_download_url might respond 404 to curl without auth.
+          # But since we are inside Actions, we can try using the GITHUB_TOKEN header.
+          
+          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/octet-stream" -o waylog.tar.gz ${{ steps.get_release.outputs.result }}
+          echo "sha256=$(sha256sum waylog.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
 
       - name: Update Formula
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          # Download the uploaded macOS asset to calculate SHA256
-          # Note: Ensure the repository is public or token has permission for testing before release
-          URL="https://github.com/shayne-snap/waylog-cli/releases/download/v${VERSION}/waylog-macos-arm64.tar.gz"
-          curl -L -o waylog.tar.gz $URL
-          SHA256=$(sha256sum waylog.tar.gz | awk '{print $1}')
-          
+          cd homebrew-tap
           mkdir -p Formula
-          cat > Formula/waylog.rb <<EOF
+          
+          cat > Formula/waylog.rb << EOF
           class Waylog < Formula
-            desc "WayLog: Sync and save your AI coding assistant chat history"
+            desc "Seamlessly sync, preserve, and version-control your AI coding conversations locally"
             homepage "https://github.com/shayne-snap/waylog-cli"
-            url "${URL}"
-            sha256 "${SHA256}"
-            version "${VERSION}"
+            url "${{ steps.get_release.outputs.result }}"
+            sha256 "${{ steps.shasum.outputs.sha256 }}"
+            version "${{ github.ref_name }}"
+            license "Apache-2.0"
 
             def install
-              # Install waylog-cli as waylog binary command
-              bin.install "waylog-cli" => "waylog"
+              bin.install "waylog"
             end
 
             test do
@@ -109,8 +136,8 @@ jobs:
           end
           EOF
           
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/waylog.rb
-          git commit -m "Update waylog to v${VERSION}" || echo "No changes to commit"
+          git commit -m "update: waylog ${{ github.ref_name }}"
           git push

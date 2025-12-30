@@ -63,18 +63,19 @@ impl Provider for CodexProvider {
             if let Ok(mut entries) = fs::read_dir(&day_dir).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                    if path.is_file()
+                        && path.extension().and_then(|s| s.to_str()) == Some("jsonl")
                         && self
                             .probe_project_path(&path, project_path)
                             .await
                             .unwrap_or(false)
-                        {
-                            if let Ok(metadata) = fs::metadata(&path).await {
-                                if let Ok(modified) = metadata.modified() {
-                                    candidates.push((path, modified));
-                                }
+                    {
+                        if let Ok(metadata) = fs::metadata(&path).await {
+                            if let Ok(modified) = metadata.modified() {
+                                candidates.push((path, modified));
                             }
                         }
+                    }
                 }
             }
         }

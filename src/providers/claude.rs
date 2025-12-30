@@ -80,8 +80,7 @@ impl Provider for ClaudeProvider {
                 continue;
             }
 
-            let event: ClaudeEvent =
-                serde_json::from_str(&line).map_err(WaylogError::Json)?;
+            let event: ClaudeEvent = serde_json::from_str(&line).map_err(WaylogError::Json)?;
 
             // Extract session metadata from first event
             if session_id.is_empty() {

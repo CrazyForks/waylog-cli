@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger when pushing tags starting with v, e.g. v0.1.0
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_name: waylog-cli
+            asset_name: waylog-macos-arm64.tar.gz
+          - os: ubuntu-latest
+            artifact_name: waylog-cli
+            asset_name: waylog-linux-x64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          cd target/release
+          tar -czf ../../${{ matrix.asset_name }} waylog-cli
+          cd ../..
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ matrix.asset_name }}
+          asset_name: ${{ matrix.asset_name }}
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  update-formula:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Tap Repo
+        uses: actions/checkout@v4
+        with:
+          repository: shayne-snap/homebrew-tap # Confirm this is your Tap repository
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update Formula
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          # Download the uploaded macOS asset to calculate SHA256
+          # Note: Ensure the repository is public or token has permission for testing before release
+          URL="https://github.com/shayne-snap/waylog-cli/releases/download/v${VERSION}/waylog-macos-arm64.tar.gz"
+          curl -L -o waylog.tar.gz $URL
+          SHA256=$(sha256sum waylog.tar.gz | awk '{print $1}')
+          
+          mkdir -p Formula
+          cat > Formula/waylog.rb <<EOF
+          class Waylog < Formula
+            desc "WayLog: Sync and save your AI coding assistant chat history"
+            homepage "https://github.com/shayne-snap/waylog-cli"
+            url "${URL}"
+            sha256 "${SHA256}"
+            version "${VERSION}"
+
+            def install
+              # Install waylog-cli as waylog binary command
+              bin.install "waylog-cli" => "waylog"
+            end
+
+            test do
+              system "#{bin}/waylog", "--version"
+            end
+          end
+          EOF
+          
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add Formula/waylog.rb
+          git commit -m "Update waylog to v${VERSION}" || echo "No changes to commit"
+          git push

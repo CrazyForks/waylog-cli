@@ -37,8 +37,15 @@ pub fn encode_path_claude(path: &Path) -> String {
     let path_str = path.to_string_lossy();
     let normalized = path_str.replace('\\', "/");
 
-    normalized.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+    normalized
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
